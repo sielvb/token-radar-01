@@ -19,6 +19,13 @@
 // log age, chain count, category medians) and rejected: every one of them made the cross-validated
 // error worse, so this model uses TVL alone and says so. No protocol name is ever special-cased:
 // the same function scores every row.
+//
+// Radar-3 adds what the value is worth to one farmer, not just to the protocol:
+// every row carries its implied value net of gas and that net spread over the hold
+// (net dollars per hour), with the assumption stated on the page, that the launch pays
+// the full implied value. It also carries the families view: the board grouped by
+// category, with each family's size, median implied value and best farm. The value
+// model itself is unchanged from radar-2: the same power law, the same ranks.
 
 /** The snapshot's protocol entry: exactly the ten fields the sealed input carries. */
 export interface SnapshotProtocol {
@@ -55,13 +62,13 @@ export const MODEL: ModelConstants = {
 };
 
 /** The model's version label: the dashboard names it and the rules quote it. */
-export const MODEL_VERSION = 'radar-2';
+export const MODEL_VERSION = 'radar-3';
 
 /** How many pre-token protocols below the watchlist floor the early radar carries: all of them.
  *  The board is every rankable protocol, watchlist plus the rest, with no TVL cap. */
 
-/** How many live-token protocols the Live token view carries, by market cap. */
-export const LIVE_ROWS = 24;
+/** The Live token view carries every live-token protocol with a recorded market cap,
+ *  by market cap: the whole calibration set, not a top slice of it. */
 
 /** A farm step: the action, what it costs, and how long it takes. */
 export interface FarmStep {
@@ -87,6 +94,8 @@ export interface BoardRow {
   age_days: number | null;
   implied_value_usd: number;
   farm_score: number;
+  net_value_usd: number;
+  net_per_hour_usd: number;
   verdict: 'FARM' | 'THIN' | 'SKIP';
   model: {
     coefficient: number;
@@ -110,6 +119,8 @@ export interface RadarRow {
   age_days: number | null;
   implied_value_usd: number;
   farm_score: number;
+  net_value_usd: number;
+  net_per_hour_usd: number;
   verdict: 'FARM' | 'THIN' | 'SKIP';
 }
 
@@ -122,6 +133,18 @@ export interface LiveRow {
   tvl_usd: number;
   mcap_usd: number | null;
   change_7d: number | null;
+}
+
+/** One family of the board: a category's size, median implied value, farm count
+ *  and best farm. */
+export interface FamilyRow {
+  category: string;
+  count: number;
+  median_implied_usd: number;
+  farm_count: number;
+  top_slug: string;
+  top_name: string;
+  top_verdict: 'FARM' | 'THIN' | 'SKIP';
 }
 
 /** Everything the dashboard needs: the board, the live set, and the model it runs. */
@@ -144,6 +167,7 @@ export interface RadarData {
     rejected: string[];
   };
   farm_score_tertiles: [number, number];
+  families: FamilyRow[];
   rows: RadarRow[];
   live: LiveRow[];
 }
@@ -266,6 +290,8 @@ export function buildBoard(snapshot: Snapshot, model: ModelConstants = MODEL): {
     age_days: s.age,
     implied_value_usd: s.implied,
     farm_score: s.econ.score,
+    net_value_usd: s.econ.net,
+    net_per_hour_usd: s.econ.netPerHour,
     verdict: verdictFor(s.econ.score),
     model: {
       coefficient: model.coefficient,
@@ -326,13 +352,18 @@ function actionFor(p: SnapshotProtocol, capital: number, chain: string): string 
 }
 
 /** One farm position's economics: the capital it needs, the gas it burns, the hold it takes,
- *  and the farm score (implied dollars per gas-dollar-day). Capital is not a cost: it comes back
- *  on withdrawal. Gas and days are the real cost, so the score divides by them, not by capital. */
+ *  the farm score (implied dollars per gas-dollar-day), and what the position is worth net:
+ *  the implied value minus the gas, and that net spread over the hold in dollars per hour.
+ *  Capital is not a cost: it comes back on withdrawal. Gas and days are the real cost, so the
+ *  score divides by them, not by capital. The net figures assume the launch pays the full
+ *  implied value; a real distribution usually pays a fraction of it. */
 export interface FarmEconomics {
   capital: number;
   gas: number;
   hold: number;
   score: number;
+  net: number;
+  netPerHour: number;
 }
 
 export function farmEconomics(p: SnapshotProtocol, age: number | null, implied: number): FarmEconomics {
@@ -341,7 +372,9 @@ export function farmEconomics(p: SnapshotProtocol, age: number | null, implied: 
   const setupGas = capital >= 150 ? 8 : 4;
   const gas = setupGas + 2 * Math.ceil(hold / 7);
   const score = Math.round(implied / (gas * hold));
-  return { capital, gas, hold, score };
+  const net = implied - gas;
+  const netPerHour = Math.round(net / (hold * 24));
+  return { capital, gas, hold, score, net, netPerHour };
 }
 
 /** A short dollar figure for a farm step: $89.7M, $3.3M, $412K. */
@@ -353,10 +386,12 @@ function fmtUsdShort(n: number): string {
 }
 
 /**
- * A protocol's farm plan: seven steps, each an action with a cost and a time. The plan is derived from
+ * A protocol's farm plan: eight steps, each an action with a cost and a time. The plan is derived from
  * the protocol's own record (category, chains, TVL, age) and its implied value, never from a
  * hand-written list of names. The seventh step carries the economics: what farming is worth against
- * what it costs, with the verdict the board's own farm-score tertiles give.
+ * what it costs, with the verdict the board's own farm-score tertiles give. The eighth states the
+ * net: the implied value minus the gas, spread over the hold in dollars per hour, with the
+ * assumption that the launch pays the full implied value.
  */
 export function farmSteps(p: SnapshotProtocol, age: number | null, implied: number, econ: FarmEconomics, verdict: 'FARM' | 'THIN' | 'SKIP'): FarmStep[] {
   const chain = chainOf(p);
@@ -400,15 +435,22 @@ export function farmSteps(p: SnapshotProtocol, age: number | null, implied: numb
       cost: `about $${econ.gas} of gas in total`,
       time: `${hold} days of holding`,
     },
+    {
+      text: `Net: implied value ${fmtUsdShort(implied)} minus about $${econ.gas} of gas is ${fmtUsdShort(econ.net)} net over ${hold} days, about ${fmtUsdShort(econ.netPerHour)} per hour of holding. This assumes the launch pays the full implied value; a real distribution usually pays a fraction of it.`,
+      cost: `no further cost beyond the gas above`,
+      time: `${hold} days of holding`,
+    },
   ];
 }
 
-/** The live-token protocols, by market cap, for the dashboard's Live token view. */
+/** The live-token protocols with a positive recorded market cap, by market cap, for the
+ *  dashboard's Live token view: the whole calibration set, so the view the model was
+ *  fitted on is the view the reader sees. Sixteen more record a market cap of zero or
+ *  less and are not in the set. */
 export function liveRows(snapshot: Snapshot): LiveRow[] {
   return snapshot.protocols
-    .filter((p) => !isPreToken(p) && p.category !== 'CEX')
+    .filter((p) => !isPreToken(p) && p.mcap_usd !== null && p.mcap_usd > 0)
     .sort((a, b) => (b.mcap_usd ?? 0) - (a.mcap_usd ?? 0) || b.tvl_usd - a.tvl_usd)
-    .slice(0, LIVE_ROWS)
     .map((p) => ({
       slug: p.slug,
       name: p.name,
@@ -435,8 +477,44 @@ export function radarRow(row: BoardRow): RadarRow {
     age_days: row.age_days,
     implied_value_usd: row.implied_value_usd,
     farm_score: row.farm_score,
+    net_value_usd: row.net_value_usd,
+    net_per_hour_usd: row.net_per_hour_usd,
     verdict: row.verdict,
   };
+}
+
+/** The board grouped by category: each family's size, median implied value, farm count
+ *  and best row, strongest median first. Categories the snapshot leaves blank group
+ *  under 'Other'. The best row is the family's highest-ranked FARM when it has
+ *  one, else its highest-ranked row, with its verdict shown. */
+export function familyRows(board: BoardRow[]): FamilyRow[] {
+  const groups = new Map<string, BoardRow[]>();
+  for (const row of board) {
+    const key = row.category ?? 'Other';
+    const list = groups.get(key) ?? [];
+    list.push(row);
+    groups.set(key, list);
+  }
+  const families = [...groups.entries()].map(([category, rows]) => {
+    const implied = rows.map((r) => r.implied_value_usd).sort((a, b) => a - b);
+    const median =
+      implied.length % 2 === 1
+        ? implied[Math.floor(implied.length / 2)]!
+        : Math.round((implied[implied.length / 2 - 1]! + implied[implied.length / 2]!) / 2);
+    const farms = rows.filter((r) => r.verdict === 'FARM');
+    const top = farms.length > 0 ? farms[0]! : rows[0]!;
+    return {
+      category,
+      count: rows.length,
+      median_implied_usd: median,
+      farm_count: farms.length,
+      top_slug: top.slug,
+      top_name: top.name,
+      top_verdict: top.verdict,
+    };
+  });
+  families.sort((a, b) => b.median_implied_usd - a.median_implied_usd || b.count - a.count);
+  return families;
 }
 
 /** Everything the dashboard renders, from the snapshot. */
@@ -444,6 +522,7 @@ export function buildRadar(snapshot: Snapshot, model: ModelConstants = MODEL): {
   const { board, tertiles } = buildBoard(snapshot, model);
   const live = liveRows(snapshot);
   const early = board.filter((r) => !snapshot.watchlist.includes(r.slug)).length;
+  const families = familyRows(board);
   const radar: RadarData = {
     as_of: snapshot.as_of,
     source: snapshot.source,
@@ -468,6 +547,7 @@ export function buildRadar(snapshot: Snapshot, model: ModelConstants = MODEL): {
       ],
     },
     farm_score_tertiles: tertiles,
+    families,
     rows: board.map(radarRow),
     live,
   };

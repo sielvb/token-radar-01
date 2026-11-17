@@ -1,7 +1,9 @@
-// Token Radar's dashboard (radar-2). It reads window.RADAR (written beside dashboard/ by
+// Token Radar's dashboard (radar-3). It reads window.RADAR (written beside dashboard/ by
 // main.ts) and renders the ranked board, a filterable table, a per-protocol detail drawer with
 // the model's own inputs, the farm economics and the protocol's farm plan. No network: every
-// byte it shows is in data.js.
+// byte it shows is in data.js. Radar-3 adds the net return (implied value minus gas, spread
+// over the hold in dollars per hour), a families view of the board by category, and the full
+// live-token view: all 128 protocols with a recorded market cap, the calibration set itself.
 //
 // The model is a power law fitted to the 128 live-token protocols in the snapshot that carry a
 // numeric market cap: implied = 1058.456 x tvl_usd ^ 0.522 (5-fold CV median absolute log error
@@ -65,8 +67,8 @@
 
   // The farm plan is the same derivation main.ts writes to board.json: category, chains, TVL, age
   // and implied value decide the action, the capital, the hold, the gas and the verdict. No name
-  // is special-cased. The seventh step carries the economics, computed identically here and in
-  // main.ts so the page and the board never disagree.
+  // is special-cased. The seventh step carries the economics, the eighth the net return,
+  // computed identically here and in main.ts so the page and the board never disagree.
   function chainOf(p) { return p.chains && p.chains.length > 0 ? p.chains[0] : 'its main chain'; }
   function capitalFor(p) {
     if (p.tvl_usd >= 5e9) return 250;
@@ -107,6 +109,8 @@
     var capital = capitalFor(p);
     var hold = holdDaysFor(p.age_days);
     var gas = gasFor(capital, hold);
+    var net = p.implied_value_usd - gas;
+    var netPerHour = Math.round(net / (hold * 24));
     var third = p.verdict === 'FARM' ? 'top third of this board' : p.verdict === 'THIN' ? 'middle third of this board' : 'bottom third of this board';
     return [
       { text: 'Use a fresh wallet that holds only the funds you plan to farm, and keep its seed phrase offline.', cost: 'under $3 of gas for the first transaction', time: '5 minutes' },
@@ -115,7 +119,8 @@
       { text: 'Hold the position for at least ' + hold + ' days so the activity is counted in more than one snapshot.', cost: 'the $' + capital + ' stays in the position', time: hold + ' days' },
       { text: "Before you withdraw, open the protocol's own points or rewards page and claim only from the link it publishes.", cost: 'no fee to check, and never pay to claim', time: '10 minutes' },
       { text: 'Write the wallet, the dates and every transaction in a farm log so you can repeat the position or unwind it.', cost: 'nothing but the log', time: '5 minutes' },
-      { text: 'Economics: implied value ' + fmtUsd(p.implied_value_usd) + '; farm score ' + fmtInt(p.farm_score) + ' (implied dollars per gas-dollar-day); verdict ' + p.verdict + ', ' + third + '.', cost: 'about $' + gas + ' of gas in total', time: hold + ' days of holding' }
+      { text: 'Economics: implied value ' + fmtUsd(p.implied_value_usd) + '; farm score ' + fmtInt(p.farm_score) + ' (implied dollars per gas-dollar-day); verdict ' + p.verdict + ', ' + third + '.', cost: 'about $' + gas + ' of gas in total', time: hold + ' days of holding' },
+      { text: 'Net: implied value ' + fmtUsd(p.implied_value_usd) + ' minus about $' + gas + ' of gas is ' + fmtUsd(net) + ' net over ' + hold + ' days, about ' + fmtUsd(netPerHour) + ' per hour of holding. This assumes the launch pays the full implied value; a real distribution usually pays a fraction of it.', cost: 'no further cost beyond the gas above', time: hold + ' days of holding' }
     ].map(stepText);
   }
 
@@ -155,6 +160,8 @@
       else if (key === 'growth') { av = a.change_7d === null ? -Infinity : a.change_7d; bv = b.change_7d === null ? -Infinity : b.change_7d; }
       else if (key === 'age') { av = a.age_days === null ? Infinity : a.age_days; bv = b.age_days === null ? Infinity : b.age_days; }
       else if (key === 'score') { av = a.farm_score; bv = b.farm_score; }
+      else if (key === 'net') { av = a.net_value_usd; bv = b.net_value_usd; }
+      else if (key === 'nethour') { av = a.net_per_hour_usd; bv = b.net_per_hour_usd; }
       else { av = a.implied_value_usd; bv = b.implied_value_usd; }
       if (av < bv) return -state.dir;
       if (av > bv) return state.dir;
@@ -251,6 +258,8 @@
           el('span', { class: 'num', text: fmtUsd(r.implied_value_usd) })
         )),
         el('td', { class: 'num', text: fmtInt(r.farm_score) }),
+        el('td', { class: 'num', text: fmtUsd(r.net_value_usd) }),
+        el('td', { class: 'num', text: fmtUsd(r.net_per_hour_usd) }),
         el('td', null, el('span', { class: 'verdict ' + r.verdict.toLowerCase(), text: r.verdict })),
         el('td', null, el('span', { class: 'status', text: 'no token' }))
       );
@@ -268,6 +277,8 @@
             sortHeader('age', 'Age'),
             sortHeader('implied', 'Implied value'),
             sortHeader('score', 'Farm score'),
+            sortHeader('net', 'Net $'),
+            sortHeader('nethour', 'Net $/hr'),
             el('th', { scope: 'col', text: 'Verdict' }),
             el('th', { scope: 'col', text: 'Token' })
           )),
@@ -292,8 +303,49 @@
     return el('div', { class: 'panel' },
       el('div', { class: 'table-wrap' },
         el('table', null,
-          el('caption', { class: 'sub', text: 'Token live: these protocols already trade, so their market cap is a fact, not a model. They are set aside from the pre-token ranking. The ' + DATA.calibration.live_with_mcap + ' of them with a numeric market cap are the calibration set for the model.' }),
+          el('caption', { class: 'sub', text: 'Token live: these protocols already trade, so their market cap is a fact, not a model. They are set aside from the pre-token ranking. All ' + DATA.calibration.live_with_mcap + ' of them carry a positive market cap and are the calibration set for the model.' }),
           el('thead', null, el('tr', null, el('th', { scope: 'col', text: 'Status' }), el('th', { scope: 'col', text: 'Protocol' }), el('th', { scope: 'col', text: 'TVL' }), el('th', { scope: 'col', text: '7d' }), el('th', { scope: 'col', text: 'Market cap' }), el('th', { scope: 'col', text: 'Token' }))),
+          tbody
+        )
+      )
+    );
+  }
+
+  // Families: the board grouped by category, strongest median implied value first.
+  // Select a family to filter the board to it.
+  function familiesPanel() {
+    var tbody = el('tbody');
+    DATA.families.forEach(function (f) {
+      var tr = el('tr', {
+        tabindex: '0',
+        onclick: function () { state.category = f.category; state.tab = 'pre-token'; writeHash(); render(); window.scrollTo(0, 0); },
+        onkeydown: function (e) { if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); state.category = f.category; state.tab = 'pre-token'; writeHash(); render(); window.scrollTo(0, 0); } }
+      },
+        el('td', null, el('b', { text: f.category })),
+        el('td', { class: 'num', text: String(f.count) }),
+        el('td', { class: 'num', text: String(f.farm_count) }),
+        el('td', { class: 'num', text: fmtUsd(f.median_implied_usd) }),
+        el('td', null, el('div', { class: 'name' },
+          el('b', { text: f.top_name }),
+          el('span', { class: 'sub', text: 'best ' + f.top_verdict.toLowerCase() + ' in this family' })
+        )),
+        el('td', null, el('span', { class: 'verdict ' + f.top_verdict.toLowerCase(), text: f.top_verdict }))
+      );
+      tbody.appendChild(tr);
+    });
+    return el('section', { class: 'panel model' },
+      el('h2', { text: 'Families' }),
+      el('p', { class: 'sub', text: 'The board by category: each family\u2019s size, how many of its rows are FARM, its median implied value and its best row. Select a family to filter the board to it. Categories are presentation only: the model scores every protocol with the same power law, and category medians were tested and rejected as a value adjustment.' }),
+      el('div', { class: 'table-wrap' },
+        el('table', null,
+          el('thead', null, el('tr', null,
+            el('th', { scope: 'col', text: 'Family' }),
+            el('th', { scope: 'col', text: 'Rows' }),
+            el('th', { scope: 'col', text: 'FARM' }),
+            el('th', { scope: 'col', text: 'Median implied' }),
+            el('th', { scope: 'col', text: 'Best row' }),
+            el('th', { scope: 'col', text: 'Verdict' })
+          )),
           tbody
         )
       )
@@ -310,13 +362,13 @@
       el('div', { class: 'formula' },
         'implied = round( ' + m.coefficient + ' x tvl_usd ^ ' + m.exponent + ' )'
       ),
-      el('p', { class: 'sub', text: 'The power law is fitted to the ' + cal.live_with_mcap + ' live-token protocols in this snapshot that carry a numeric market cap: log(market cap) = 6.965 + 0.522 x log(TVL). Market caps grow sub-linearly with TVL, so a fixed multiple overvalues the largest protocols and undervalues the smallest. Five-fold cross-validation, median absolute log error ' + cal.median_abs_log_error + ' (mean ' + cal.mean_abs_log_error + '), against ' + cal.starter_median_abs_log_error + ' for the house starter. The fit uses only protocols with a market cap on record; the other live-token rows carry a CoinGecko id or a symbol but no market cap, so they cannot calibrate the model and are set aside with the live view.' }),
+      el('p', { class: 'sub', text: 'The power law is fitted to the ' + cal.live_with_mcap + ' live-token protocols in this snapshot that carry a positive market cap: log(market cap) = 6.965 + 0.522 x log(TVL). Market caps grow sub-linearly with TVL, so a fixed multiple overvalues the largest protocols and undervalues the smallest. Five-fold cross-validation, median absolute log error ' + cal.median_abs_log_error + ' (mean ' + cal.mean_abs_log_error + '), against ' + cal.starter_median_abs_log_error + ' for the house starter. The fit uses only protocols with a positive market cap on record; the other live-token rows already trade but record no market cap, or a market cap of zero or less, so they cannot calibrate the model and are not ranked.' }),
       el('h2', { text: 'What was tested and rejected' }),
       el('p', { class: 'sub', text: 'Category medians (5-fold median 1.643-1.708), 7-day growth added (1.291), log age added (1.235) and chain count added (1.305) all made the cross-validated error worse than TVL alone (1.182), so none of them is in the model. The categories do differ in their median market-cap-to-TVL ratio, but with only 128 calibration protocols the per-category medians are noise out of sample, and this board says so instead of applying them.' }),
       el('h2', { text: 'What counts as pre-token' }),
       el('p', { class: 'sub', text: 'A row records no token (no market cap, no CoinGecko id, no symbol) and is not a wrapped, staked or bridged product under the house rule in input/README.md: its category is not Bridge, Canonical Bridge, Liquid Staking, Liquid Restaking, Restaked BTC or CEX, its name carries no whole word wrapped, staked or staking, and it does not begin with an exchange name. WBTC is Bitcoin on Ethereum and Binance staked ETH is ETH in a staking product: neither is a protocol awaiting a launch of its own, so neither is ranked here. The rule is applied to every board row, not only to the watchlist.' }),
       el('h2', { text: 'Farm economics' }),
-      el('p', { class: 'sub', text: 'Capital comes from the TVL tier ($50 / $100 / $150 / $250). Gas is the setup gas plus $2 a week over the hold (30 / 45 / 60 days by age). Capital is not a cost: it comes back on withdrawal. The farm score is implied value divided by gas times hold days: implied dollars per gas-dollar-day. Verdicts are tertiles of this board: FARM at ' + fmtInt(t[1]) + ' and above, THIN at ' + fmtInt(t[0]) + ' and above, SKIP below. No farmer count is invented: the score compares what a launch would be worth against what farming it costs, and the verdict is relative to this board, not an absolute promise.' })
+      el('p', { class: 'sub', text: 'Capital comes from the TVL tier ($50 / $100 / $150 / $250). Gas is the setup gas plus $2 a week over the hold (30 / 45 / 60 days by age). Capital is not a cost: it comes back on withdrawal. The farm score is implied value divided by gas times hold days: implied dollars per gas-dollar-day. Verdicts are tertiles of this board: FARM at ' + fmtInt(t[1]) + ' and above, THIN at ' + fmtInt(t[0]) + ' and above, SKIP below. Net is the implied value minus the gas; net per hour spreads that net over the hold. Both assume the launch pays the full implied value, which a real distribution usually does not. No farmer count is invented: the score compares what a launch would be worth against what farming it costs, and the verdict is relative to this board, not an absolute promise.' })
     );
   }
 
@@ -358,9 +410,11 @@
         el('div', null, el('span', { text: 'Gas, total' }), el('b', { class: 'num', text: 'about $' + gas })),
         el('div', null, el('span', { text: 'Hold' }), el('b', { class: 'num', text: hold + ' days' })),
         el('div', null, el('span', { text: 'Farm score' }), el('b', { class: 'num', text: fmtInt(row.farm_score) })),
+        el('div', null, el('span', { text: 'Net value' }), el('b', { class: 'num', text: fmtUsd(row.net_value_usd) })),
+        el('div', null, el('span', { text: 'Net per hour' }), el('b', { class: 'num', text: fmtUsd(row.net_per_hour_usd) })),
         el('div', null, el('span', { text: 'Verdict' }), el('b', { class: 'num', text: row.verdict }))
       ),
-      el('p', { class: 'sub', text: 'Farm score is implied value divided by gas times hold days. Capital is not in the score: it comes back on withdrawal.' })
+      el('p', { class: 'sub', text: 'Farm score is implied value divided by gas times hold days. Capital is not in the score: it comes back on withdrawal. Net is the implied value minus the gas, spread over the hold; it assumes the launch pays the full implied value, which a real distribution usually does not.' })
     ));
     dialog.appendChild(el('section', { class: 'detail-section' },
       el('h3', { text: 'Farm plan' }),
@@ -385,7 +439,7 @@
     shell.appendChild(lede());
     shell.appendChild(controls());
     shell.appendChild(state.tab === 'pre-token' ? boardTable() : liveTable());
-    if (state.tab === 'pre-token') shell.appendChild(modelPanel());
+    if (state.tab === 'pre-token') { shell.appendChild(familiesPanel()); shell.appendChild(modelPanel()); }
     app.appendChild(shell);
     app.setAttribute('aria-busy', 'false');
     if (!dialog.isConnected) app.appendChild(dialog);
